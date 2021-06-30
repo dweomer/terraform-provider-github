@@ -2,6 +2,7 @@ package github
 
 import (
 	"fmt"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/terraform"
 )
@@ -73,6 +74,7 @@ func Provider() terraform.ResourceProvider {
 		},
 
 		ResourcesMap: map[string]*schema.Resource{
+			"github_actions_environment_secret":  resourceGithubActionsEnvironmentSecret(),
 			"github_actions_organization_secret": resourceGithubActionsOrganizationSecret(),
 			"github_actions_secret":              resourceGithubActionsSecret(),
 			"github_app_installation_repository": resourceGithubAppInstallationRepository(),
@@ -88,6 +90,7 @@ func Provider() terraform.ResourceProvider {
 			"github_project_column":              resourceGithubProjectColumn(),
 			"github_repository_collaborator":     resourceGithubRepositoryCollaborator(),
 			"github_repository_deploy_key":       resourceGithubRepositoryDeployKey(),
+			"github_repository_environment":      resourceGithubRepositoryEnvironment(),
 			"github_repository_file":             resourceGithubRepositoryFile(),
 			"github_repository_milestone":        resourceGithubRepositoryMilestone(),
 			"github_repository_project":          resourceGithubRepositoryProject(),
@@ -150,7 +153,7 @@ func init() {
 			"`token`. Anonymous mode is enabled if both `token` and `app_auth` are not set.",
 		"app_auth.id":              "The GitHub App ID.",
 		"app_auth.installation_id": "The GitHub App installation instance ID.",
-		"app_auth.pem_file":        "The GitHub App PEM file path.",
+		"app_auth.pem_file":        "The GitHub App PEM file contents.",
 	}
 }
 

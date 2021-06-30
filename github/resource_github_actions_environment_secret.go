@@ -3,26 +3,30 @@ package github
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/google/go-github/v35/github"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
-	"golang.org/x/crypto/nacl/box"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 )
 
-func resourceGithubActionsSecret() *schema.Resource {
+func resourceGithubActionsEnvironmentSecret() *schema.Resource {
 	return &schema.Resource{
-		Create: resourceGithubActionsSecretCreateOrUpdate,
-		Read:   resourceGithubActionsSecretRead,
-		Update: resourceGithubActionsSecretCreateOrUpdate,
-		Delete: resourceGithubActionsSecretDelete,
+		Create: resourceGithubActionsEnvironmentSecretCreateOrUpdate,
+		Read:   resourceGithubActionsEnvironmentSecretRead,
+		Delete: resourceGithubActionsEnvironmentSecretDelete,
 
 		Schema: map[string]*schema.Schema{
 			"repository": {
 				Type:     schema.TypeString,
 				Required: true,
+				ForceNew: true,
+			},
+			"environment": {
+				Type:     schema.TypeString,
+				Required: true,
+				ForceNew: true,
 			},
 			"secret_name": {
 				Type:         schema.TypeString,
@@ -32,15 +36,16 @@ func resourceGithubActionsSecret() *schema.Resource {
 			},
 			"encrypted_value": {
 				Type:          schema.TypeString,
-				ForceNew:      true,
 				Optional:      true,
+				ForceNew:      true,
 				Sensitive:     true,
 				ConflictsWith: []string{"plaintext_value"},
+				ValidateFunc:  validation.StringIsBase64,
 			},
 			"plaintext_value": {
 				Type:          schema.TypeString,
-				ForceNew:      true,
 				Optional:      true,
+				ForceNew:      true,
 				Sensitive:     true,
 				ConflictsWith: []string{"encrypted_value"},
 			},
@@ -56,17 +61,23 @@ func resourceGithubActionsSecret() *schema.Resource {
 	}
 }
 
-func resourceGithubActionsSecretCreateOrUpdate(d *schema.ResourceData, meta interface{}) error {
+func resourceGithubActionsEnvironmentSecretCreateOrUpdate(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*Owner).v3client
 	owner := meta.(*Owner).name
 	ctx := context.Background()
 
-	repo := d.Get("repository").(string)
+	repoName := d.Get("repository").(string)
+	envName := d.Get("environment").(string)
 	secretName := d.Get("secret_name").(string)
 	plaintextValue := d.Get("plaintext_value").(string)
 	var encryptedValue string
 
-	keyId, publicKey, err := getPublicKeyDetails(owner, repo, meta)
+	repo, _, err := client.Repositories.Get(ctx, owner, repoName)
+	if err != nil {
+		return err
+	}
+
+	keyId, publicKey, err := getEnvironmentPublicKeyDetails(repo.GetID(), envName, meta)
 	if err != nil {
 		return err
 	}
@@ -88,30 +99,35 @@ func resourceGithubActionsSecretCreateOrUpdate(d *schema.ResourceData, meta inte
 		EncryptedValue: encryptedValue,
 	}
 
-	_, err = client.Actions.CreateOrUpdateRepoSecret(ctx, owner, repo, eSecret)
+	_, err = client.Actions.CreateOrUpdateEnvSecret(ctx, repo.GetID(), envName, eSecret)
 	if err != nil {
 		return err
 	}
 
-	d.SetId(buildTwoPartID(repo, secretName))
-	return resourceGithubActionsSecretRead(d, meta)
+	d.SetId(buildThreePartID(repoName, envName, secretName))
+	return resourceGithubActionsEnvironmentSecretRead(d, meta)
 }
 
-func resourceGithubActionsSecretRead(d *schema.ResourceData, meta interface{}) error {
+func resourceGithubActionsEnvironmentSecretRead(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*Owner).v3client
 	owner := meta.(*Owner).name
 	ctx := context.Background()
 
-	repoName, secretName, err := parseTwoPartID(d.Id(), "repository", "secret_name")
+	repoName, envName, secretName, err := parseThreePartID(d.Id(), "repository", "environment", "secret_name")
 	if err != nil {
 		return err
 	}
 
-	secret, _, err := client.Actions.GetRepoSecret(ctx, owner, repoName, secretName)
+	repo, _, err := client.Repositories.Get(ctx, owner, repoName)
+	if err != nil {
+		return err
+	}
+
+	secret, _, err := client.Actions.GetEnvSecret(ctx, repo.GetID(), envName, secretName)
 	if err != nil {
 		if ghErr, ok := err.(*github.ErrorResponse); ok {
 			if ghErr.Response.StatusCode == http.StatusNotFound {
-				log.Printf("[WARN] Removing actions secret %s from state because it no longer exists in GitHub",
+				log.Printf("[WARN] Removing environment secret %s from state because it no longer exists in GitHub",
 					d.Id())
 				d.SetId("")
 				return nil
@@ -140,7 +156,7 @@ func resourceGithubActionsSecretRead(d *schema.ResourceData, meta interface{}) e
 	// as deleted (unset the ID) in order to fix potential drift by recreating
 	// the resource.
 	if updatedAt, ok := d.GetOk("updated_at"); ok && updatedAt != secret.UpdatedAt.String() {
-		log.Printf("[WARN] The secret %s has been externally updated in GitHub", d.Id())
+		log.Printf("[WARN] The environment secret %s has been externally updated in GitHub", d.Id())
 		d.SetId("")
 	} else if !ok {
 		d.Set("updated_at", secret.UpdatedAt.String())
@@ -149,53 +165,33 @@ func resourceGithubActionsSecretRead(d *schema.ResourceData, meta interface{}) e
 	return nil
 }
 
-func resourceGithubActionsSecretDelete(d *schema.ResourceData, meta interface{}) error {
+func resourceGithubActionsEnvironmentSecretDelete(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*Owner).v3client
-	orgName := meta.(*Owner).name
+	owner := meta.(*Owner).name
 	ctx := context.WithValue(context.Background(), ctxId, d.Id())
 
-	repoName, secretName, err := parseTwoPartID(d.Id(), "repository", "secret_name")
+	repoName, envName, secretName, err := parseThreePartID(d.Id(), "repository", "environment", "secret_name")
 	if err != nil {
 		return err
 	}
-
-	log.Printf("[DEBUG] Deleting secret: %s", d.Id())
-	_, err = client.Actions.DeleteRepoSecret(ctx, orgName, repoName, secretName)
+	repo, _, err := client.Repositories.Get(ctx, owner, repoName)
+	if err != nil {
+		return err
+	}
+	log.Printf("[DEBUG] Deleting environment secret: %s", d.Id())
+	_, err = client.Actions.DeleteEnvSecret(ctx, repo.GetID(), envName, secretName)
 
 	return err
 }
 
-func getPublicKeyDetails(owner, repository string, meta interface{}) (keyId, pkValue string, err error) {
+func getEnvironmentPublicKeyDetails(repoID int64, envName string, meta interface{}) (keyId, pkValue string, err error) {
 	client := meta.(*Owner).v3client
 	ctx := context.Background()
 
-	publicKey, _, err := client.Actions.GetRepoPublicKey(ctx, owner, repository)
+	publicKey, _, err := client.Actions.GetEnvPublicKey(ctx, int(repoID), envName)
 	if err != nil {
 		return keyId, pkValue, err
 	}
 
 	return publicKey.GetKeyID(), publicKey.GetKey(), err
-}
-
-func encryptPlaintext(plaintext, publicKeyB64 string) ([]byte, error) {
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyB64)
-	if err != nil {
-		return nil, err
-	}
-
-	var publicKeyBytes32 [32]byte
-	copiedLen := copy(publicKeyBytes32[:], publicKeyBytes)
-	if copiedLen == 0 {
-		return nil, fmt.Errorf("could not convert publicKey to bytes")
-	}
-
-	plaintextBytes := []byte(plaintext)
-	var encryptedBytes []byte
-
-	cipherText, err := box.SealAnonymous(encryptedBytes, plaintextBytes, &publicKeyBytes32, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return cipherText, nil
 }
